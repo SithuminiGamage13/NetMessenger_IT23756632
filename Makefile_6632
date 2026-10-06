@@ -1,0 +1,16 @@
+CC = gcc
+CFLAGS = -Wall -Wextra -pthread
+
+SERVER = server_6632
+CLIENT = client_6632
+
+all: $(SERVER) $(CLIENT)
+
+$(SERVER): server_6632.c
+	$(CC) $(CFLAGS) server_6632.c -o $(SERVER)
+
+$(CLIENT): client_6632.c
+	$(CC) $(CFLAGS) client_6632.c -o $(CLIENT)
+
+clean:
+	rm -f $(SERVER) $(CLIENT)
