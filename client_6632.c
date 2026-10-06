@@ -9,6 +9,29 @@
 #define PORT 12632
 #define BUFFER_SIZE 1024
 
+static int send_all(int fd, const char *message)
+{
+    size_t length = strlen(message);
+    size_t sent = 0;
+
+    while (sent < length)
+    {
+        ssize_t n = send(fd,
+                         message + sent,
+                         length - sent,
+                         0);
+
+        if (n <= 0)
+        {
+            return -1;
+        }
+
+        sent += (size_t)n;
+    }
+
+    return 0;
+}
+
 int main(void)
 {
     int sockfd;
@@ -55,31 +78,43 @@ int main(void)
            SERVER_IP,
            PORT);
 
-    printf("Enter registration command: ");
-
-    if (fgets(buffer, sizeof(buffer), stdin) == NULL)
+    while (1)
     {
-        close(sockfd);
-        return EXIT_FAILURE;
-    }
+        printf("> ");
 
-    send(sockfd,
-         buffer,
-         strlen(buffer),
-         0);
+        if (fgets(buffer, sizeof(buffer), stdin) == NULL)
+        {
+            break;
+        }
 
-    memset(response, 0, sizeof(response));
+        if (send_all(sockfd, buffer) < 0)
+        {
+            printf("Failed to send command.\n");
+            break;
+        }
 
-    ssize_t bytes_received =
-        recv(sockfd,
-             response,
-             sizeof(response) - 1,
-             0);
+        memset(response, 0, sizeof(response));
 
-    if (bytes_received > 0)
-    {
+        ssize_t bytes_received =
+            recv(sockfd,
+                 response,
+                 sizeof(response) - 1,
+                 0);
+
+        if (bytes_received <= 0)
+        {
+            printf("Server disconnected.\n");
+            break;
+        }
+
         response[bytes_received] = '\0';
+
         printf("Server: %s", response);
+
+        if (strncmp(buffer, "QUIT", 4) == 0)
+        {
+            break;
+        }
     }
 
     close(sockfd);

@@ -10,6 +10,26 @@
 #define BUFFER_SIZE 1024
 #define NID_TAG "NID:7566"
 
+static int send_response(int fd, const char *message)
+{
+    size_t length = strlen(message);
+    size_t sent = 0;
+
+    while (sent < length)
+    {
+        ssize_t n = send(fd, message + sent, length - sent, 0);
+
+        if (n <= 0)
+        {
+            return -1;
+        }
+
+        sent += (size_t)n;
+    }
+
+    return 0;
+}
+
 int main(void)
 {
     int server_fd;
@@ -22,7 +42,9 @@ int main(void)
     socklen_t client_len = sizeof(client_addr);
 
     char buffer[BUFFER_SIZE];
-    char username[50];
+    char username[50] = "";
+
+    int registered = 0;
 
     server_fd = socket(AF_INET, SOCK_STREAM, 0);
 
@@ -32,8 +54,11 @@ int main(void)
         return EXIT_FAILURE;
     }
 
-    if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR,
-                   &opt, sizeof(opt)) < 0)
+    if (setsockopt(server_fd,
+                   SOL_SOCKET,
+                   SO_REUSEADDR,
+                   &opt,
+                   sizeof(opt)) < 0)
     {
         perror("setsockopt");
         close(server_fd);
@@ -81,51 +106,85 @@ int main(void)
            inet_ntoa(client_addr.sin_addr),
            ntohs(client_addr.sin_port));
 
-    memset(buffer, 0, sizeof(buffer));
-
-    ssize_t bytes_received =
-        recv(client_fd, buffer, sizeof(buffer) - 1, 0);
-
-    if (bytes_received <= 0)
+    while (1)
     {
-        printf("Client disconnected before registration.\n");
-        close(client_fd);
-        close(server_fd);
-        return EXIT_SUCCESS;
-    }
+        memset(buffer, 0, sizeof(buffer));
 
-    buffer[bytes_received] = '\0';
+        ssize_t bytes_received =
+            recv(client_fd,
+                 buffer,
+                 sizeof(buffer) - 1,
+                 0);
 
-    buffer[strcspn(buffer, "\r\n")] = '\0';
+        if (bytes_received <= 0)
+        {
+            printf("Client disconnected.\n");
+            break;
+        }
 
-    printf("Received: %s\n", buffer);
+        buffer[bytes_received] = '\0';
 
-    if (sscanf(buffer, "REGISTER %49s", username) == 1)
-    {
-        char response[BUFFER_SIZE];
+        buffer[strcspn(buffer, "\r\n")] = '\0';
 
-        snprintf(response,
-                 sizeof(response),
-                 "OK REGISTERED %s %s\n",
-                 username,
-                 NID_TAG);
+        printf("Received: %s\n", buffer);
 
-        send(client_fd,
-             response,
-             strlen(response),
-             0);
+        if (!registered)
+        {
+            if (sscanf(buffer, "REGISTER %49s", username) == 1)
+            {
+                char response[BUFFER_SIZE];
 
-        printf("Registered user: %s\n", username);
-    }
-    else
-    {
-        const char *response =
-            "ERR 005 INVALID_COMMAND NID:7566\n";
+                registered = 1;
 
-        send(client_fd,
-             response,
-             strlen(response),
-             0);
+                snprintf(response,
+                         sizeof(response),
+                         "OK REGISTERED %s %s\n",
+                         username,
+                         NID_TAG);
+
+                send_response(client_fd, response);
+
+                printf("Registered user: %s\n", username);
+            }
+            else
+            {
+                send_response(
+                    client_fd,
+                    "ERR 005 REGISTER_REQUIRED NID:7566\n");
+            }
+
+            continue;
+        }
+
+        if (strcmp(buffer, "LIST") == 0)
+        {
+            char response[BUFFER_SIZE];
+
+            snprintf(response,
+                     sizeof(response),
+                     "OK USERS %s %s\n",
+                     username,
+                     NID_TAG);
+
+            send_response(client_fd, response);
+        }
+        else if (strcmp(buffer, "QUIT") == 0)
+        {
+            send_response(
+                client_fd,
+                "OK BYE NID:7566\n");
+
+            printf("User %s disconnected gracefully.\n",
+                   username);
+
+            break;
+        }
+        else
+        {
+            send_response(
+                client_fd,
+                "ERR 005 INVALID_COMMAND NID:7566\n");
+        }
     }
 
     close(client_fd);
