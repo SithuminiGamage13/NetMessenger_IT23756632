@@ -7,51 +7,82 @@
 
 #define SERVER_IP "127.0.0.1"
 #define PORT 12632
+#define BUFFER_SIZE 1024
 
 int main(void)
 {
-	int sockfd;
+    int sockfd;
 
-	struct sockaddr_in server_addr;
+    struct sockaddr_in server_addr;
 
-	sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    char buffer[BUFFER_SIZE];
+    char response[BUFFER_SIZE];
 
-	if (sockfd < 0)
-	{
-		perror("socket");
-		return EXIT_FAILURE;
-	}
+    sockfd = socket(AF_INET, SOCK_STREAM, 0);
 
-	memset(&server_addr, 0, sizeof(server_addr));
+    if (sockfd < 0)
+    {
+        perror("socket");
+        return EXIT_FAILURE;
+    }
 
-	server_addr.sin_family = AF_INET;
-	server_addr.sin_port = htons(PORT);
+    memset(&server_addr, 0, sizeof(server_addr));
 
-	if (inet_pton(AF_INET,
-		SERVER_IP,
-		&server_addr.sin_addr) <= 0)
-	{
-		perror("inet_pton");
-		close(sockfd);
-		return EXIT_FAILURE;
-	}
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_port = htons(PORT);
 
-	printf("Connecting to NetMessenger server...\n");
+    if (inet_pton(AF_INET,
+                  SERVER_IP,
+                  &server_addr.sin_addr) <= 0)
+    {
+        perror("inet_pton");
+        close(sockfd);
+        return EXIT_FAILURE;
+    }
 
-	if (connect(sockfd,
-		(struct sockaddr *)&server_addr,
-		sizeof(server_addr)) < 0)
-	{
-		perror("connect");
-		close(sockfd);
-		return EXIT_FAILURE;
-	}
+    printf("Connecting to NetMessenger server...\n");
 
-	printf("Connected successfully to %s%d\n",
-		SERVER_IP,
-		PORT);
+    if (connect(sockfd,
+                (struct sockaddr *)&server_addr,
+                sizeof(server_addr)) < 0)
+    {
+        perror("connect");
+        close(sockfd);
+        return EXIT_FAILURE;
+    }
 
-	close(sockfd);
+    printf("Connected successfully to %s:%d\n",
+           SERVER_IP,
+           PORT);
 
-	return EXIT_SUCCESS;
+    printf("Enter registration command: ");
+
+    if (fgets(buffer, sizeof(buffer), stdin) == NULL)
+    {
+        close(sockfd);
+        return EXIT_FAILURE;
+    }
+
+    send(sockfd,
+         buffer,
+         strlen(buffer),
+         0);
+
+    memset(response, 0, sizeof(response));
+
+    ssize_t bytes_received =
+        recv(sockfd,
+             response,
+             sizeof(response) - 1,
+             0);
+
+    if (bytes_received > 0)
+    {
+        response[bytes_received] = '\0';
+        printf("Server: %s", response);
+    }
+
+    close(sockfd);
+
+    return EXIT_SUCCESS;
 }
