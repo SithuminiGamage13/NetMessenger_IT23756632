@@ -4,3 +4,5 @@ client_6632
 *.log
 storage/
 server_6632_backup.c
+server_before_msg.c
+client_before_msg.c
