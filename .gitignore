@@ -6,3 +6,5 @@ storage/
 server_6632_backup.c
 server_before_msg.c
 client_before_msg.c
+server_before_rooms.c
+client_before_romms.c
