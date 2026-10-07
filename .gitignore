@@ -8,3 +8,5 @@ server_before_msg.c
 client_before_msg.c
 server_before_rooms.c
 client_before_romms.c
+server_commit6_backup.c
+client_commit6_backup.c
