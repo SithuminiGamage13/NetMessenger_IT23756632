@@ -19,6 +19,9 @@
 #define ROOM_NAME_SIZE 50
 #define MAX_FILE_SIZE (5 * 1024 * 1024)
 
+#define RATE_LIMIT_COMMANDS 8
+#define RATE_LIMIT_WINDOW 5
+
 #define NID_TAG "NID:7566"
 #define STORAGE_ROOT "./storage/IT23756632"
 #define LOG_FILE "netmsg_IT23756632.log"
@@ -28,7 +31,12 @@ typedef struct
     int socket_fd;
     int active;
     int registered;
+
     char username[USERNAME_SIZE];
+
+    time_t rate_window_start;
+    int command_count;
+
 } Client;
 
 typedef struct
@@ -36,13 +44,18 @@ typedef struct
     int active;
     char name[ROOM_NAME_SIZE];
     int members[MAX_CLIENTS];
+
 } Room;
 
 static Client clients[MAX_CLIENTS];
 static Room rooms[MAX_ROOMS];
 
-static pthread_mutex_t state_mutex = PTHREAD_MUTEX_INITIALIZER;
-static pthread_mutex_t log_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t state_mutex =
+    PTHREAD_MUTEX_INITIALIZER;
+
+static pthread_mutex_t log_mutex =
+    PTHREAD_MUTEX_INITIALIZER;
+
 static pthread_mutex_t send_mutex[MAX_CLIENTS];
 
 
@@ -54,24 +67,30 @@ static void log_event(const char *event)
 {
     pthread_mutex_lock(&log_mutex);
 
-    FILE *fp = fopen(LOG_FILE, "a");
+    FILE *fp =
+        fopen(LOG_FILE, "a");
 
     if (fp != NULL)
     {
-        time_t now = time(NULL);
-        struct tm *tm_info = localtime(&now);
+        time_t now =
+            time(NULL);
+
+        struct tm *tm_info =
+            localtime(&now);
 
         char timestamp[32];
 
-        strftime(timestamp,
-                 sizeof(timestamp),
-                 "%Y-%m-%d %H:%M:%S",
-                 tm_info);
+        strftime(
+            timestamp,
+            sizeof(timestamp),
+            "%Y-%m-%d %H:%M:%S",
+            tm_info);
 
-        fprintf(fp,
-                "[%s] %s\n",
-                timestamp,
-                event);
+        fprintf(
+            fp,
+            "[%s] %s\n",
+            timestamp,
+            event);
 
         fclose(fp);
     }
@@ -94,7 +113,11 @@ static ssize_t recv_line(int fd,
     {
         char c;
 
-        ssize_t n = recv(fd, &c, 1, 0);
+        ssize_t n =
+            recv(fd,
+                 &c,
+                 1,
+                 0);
 
         if (n == 0)
             return 0;
@@ -106,7 +129,9 @@ static ssize_t recv_line(int fd,
             break;
 
         if (c != '\r')
+        {
             buffer[used++] = c;
+        }
     }
 
     buffer[used] = '\0';
@@ -120,7 +145,9 @@ static int recv_exact(int fd,
                       size_t length)
 {
     size_t total = 0;
-    char *ptr = buffer;
+
+    char *ptr =
+        buffer;
 
     while (total < length)
     {
@@ -133,7 +160,8 @@ static int recv_exact(int fd,
         if (n <= 0)
             return -1;
 
-        total += (size_t)n;
+        total +=
+            (size_t)n;
     }
 
     return 0;
@@ -148,7 +176,9 @@ static int send_all_raw(int fd,
                         const void *data,
                         size_t length)
 {
-    const char *ptr = data;
+    const char *ptr =
+        data;
+
     size_t total = 0;
 
     while (total < length)
@@ -162,7 +192,8 @@ static int send_all_raw(int fd,
         if (n <= 0)
             return -1;
 
-        total += (size_t)n;
+        total +=
+            (size_t)n;
     }
 
     return 0;
@@ -174,7 +205,8 @@ static int send_text_index(int index,
 {
     int result;
 
-    pthread_mutex_lock(&send_mutex[index]);
+    pthread_mutex_lock(
+        &send_mutex[index]);
 
     result =
         send_all_raw(
@@ -182,9 +214,54 @@ static int send_text_index(int index,
             message,
             strlen(message));
 
-    pthread_mutex_unlock(&send_mutex[index]);
+    pthread_mutex_unlock(
+        &send_mutex[index]);
 
     return result;
+}
+
+
+/* --------------------------------------------------------- */
+/* RATE LIMITING                                             */
+/* --------------------------------------------------------- */
+
+static int check_rate_limit(int index)
+{
+    time_t now =
+        time(NULL);
+
+    int allowed = 1;
+
+    pthread_mutex_lock(
+        &state_mutex);
+
+    if (clients[index].rate_window_start == 0 ||
+        difftime(
+            now,
+            clients[index].rate_window_start)
+            >= RATE_LIMIT_WINDOW)
+    {
+        clients[index].rate_window_start =
+            now;
+
+        clients[index].command_count =
+            1;
+    }
+    else
+    {
+        clients[index].command_count++;
+
+        if (clients[index].command_count >
+            RATE_LIMIT_COMMANDS)
+        {
+            allowed = 0;
+        }
+    }
+
+    pthread_mutex_unlock(
+        &state_mutex);
+
+    return allowed;
 }
 
 
@@ -196,21 +273,26 @@ static int username_exists(const char *username)
 {
     int exists = 0;
 
-    pthread_mutex_lock(&state_mutex);
+    pthread_mutex_lock(
+        &state_mutex);
 
-    for (int i = 0; i < MAX_CLIENTS; i++)
+    for (int i = 0;
+         i < MAX_CLIENTS;
+         i++)
     {
         if (clients[i].active &&
             clients[i].registered &&
-            strcmp(clients[i].username,
-                   username) == 0)
+            strcmp(
+                clients[i].username,
+                username) == 0)
         {
             exists = 1;
             break;
         }
     }
 
-    pthread_mutex_unlock(&state_mutex);
+    pthread_mutex_unlock(
+        &state_mutex);
 
     return exists;
 }
@@ -220,21 +302,26 @@ static int find_user_index(const char *username)
 {
     int result = -1;
 
-    pthread_mutex_lock(&state_mutex);
+    pthread_mutex_lock(
+        &state_mutex);
 
-    for (int i = 0; i < MAX_CLIENTS; i++)
+    for (int i = 0;
+         i < MAX_CLIENTS;
+         i++)
     {
         if (clients[i].active &&
             clients[i].registered &&
-            strcmp(clients[i].username,
-                   username) == 0)
+            strcmp(
+                clients[i].username,
+                username) == 0)
         {
             result = i;
             break;
         }
     }
 
-    pthread_mutex_unlock(&state_mutex);
+    pthread_mutex_unlock(
+        &state_mutex);
 
     return result;
 }
@@ -245,31 +332,39 @@ static void build_user_list(char *output,
 {
     output[0] = '\0';
 
-    pthread_mutex_lock(&state_mutex);
+    pthread_mutex_lock(
+        &state_mutex);
 
     int first = 1;
 
-    for (int i = 0; i < MAX_CLIENTS; i++)
+    for (int i = 0;
+         i < MAX_CLIENTS;
+         i++)
     {
         if (clients[i].active &&
             clients[i].registered)
         {
             if (!first)
             {
-                strncat(output,
-                        ",",
-                        size - strlen(output) - 1);
+                strncat(
+                    output,
+                    ",",
+                    size -
+                    strlen(output) - 1);
             }
 
-            strncat(output,
-                    clients[i].username,
-                    size - strlen(output) - 1);
+            strncat(
+                output,
+                clients[i].username,
+                size -
+                strlen(output) - 1);
 
             first = 0;
         }
     }
 
-    pthread_mutex_unlock(&state_mutex);
+    pthread_mutex_unlock(
+        &state_mutex);
 }
 
 
@@ -284,9 +379,12 @@ static void presence_message(int source_index,
     int targets[MAX_CLIENTS];
     int count = 0;
 
-    pthread_mutex_lock(&state_mutex);
+    pthread_mutex_lock(
+        &state_mutex);
 
-    for (int i = 0; i < MAX_CLIENTS; i++)
+    for (int i = 0;
+         i < MAX_CLIENTS;
+         i++)
     {
         if (i != source_index &&
             clients[i].active &&
@@ -296,25 +394,31 @@ static void presence_message(int source_index,
         }
     }
 
-    pthread_mutex_unlock(&state_mutex);
+    pthread_mutex_unlock(
+        &state_mutex);
 
     char message[160];
 
-    snprintf(message,
-             sizeof(message),
-             "MSG BCAST SERVER %s %s\n",
-             username,
-             action);
+    snprintf(
+        message,
+        sizeof(message),
+        "MSG BCAST SERVER %s %s\n",
+        username,
+        action);
 
-    for (int i = 0; i < count; i++)
+    for (int i = 0;
+         i < count;
+         i++)
     {
-        send_text_index(targets[i], message);
+        send_text_index(
+            targets[i],
+            message);
     }
 }
 
 
 /* --------------------------------------------------------- */
-/* BCAST                                                     */
+/* BROADCAST                                                 */
 /* --------------------------------------------------------- */
 
 static void broadcast_message(int sender_index,
@@ -325,15 +429,20 @@ static void broadcast_message(int sender_index,
 
     char sender[USERNAME_SIZE];
 
-    pthread_mutex_lock(&state_mutex);
+    pthread_mutex_lock(
+        &state_mutex);
 
-    strncpy(sender,
-            clients[sender_index].username,
-            sizeof(sender) - 1);
+    strncpy(
+        sender,
+        clients[sender_index].username,
+        sizeof(sender) - 1);
 
-    sender[sizeof(sender) - 1] = '\0';
+    sender[
+        sizeof(sender) - 1] = '\0';
 
-    for (int i = 0; i < MAX_CLIENTS; i++)
+    for (int i = 0;
+         i < MAX_CLIENTS;
+         i++)
     {
         if (i != sender_index &&
             clients[i].active &&
@@ -343,19 +452,26 @@ static void broadcast_message(int sender_index,
         }
     }
 
-    pthread_mutex_unlock(&state_mutex);
+    pthread_mutex_unlock(
+        &state_mutex);
 
-    char outgoing[BUFFER_SIZE + 128];
+    char outgoing[
+        BUFFER_SIZE + 128];
 
-    snprintf(outgoing,
-             sizeof(outgoing),
-             "MSG BCAST %s %s\n",
-             sender,
-             message);
+    snprintf(
+        outgoing,
+        sizeof(outgoing),
+        "MSG BCAST %s %s\n",
+        sender,
+        message);
 
-    for (int i = 0; i < count; i++)
+    for (int i = 0;
+         i < count;
+         i++)
     {
-        send_text_index(targets[i], outgoing);
+        send_text_index(
+            targets[i],
+            outgoing);
     }
 }
 
@@ -374,32 +490,38 @@ static int private_message(int sender_index,
     if (target_index < 0)
         return 0;
 
-    char outgoing[BUFFER_SIZE + 128];
+    char outgoing[
+        BUFFER_SIZE + 128];
 
-    snprintf(outgoing,
-             sizeof(outgoing),
-             "MSG PRIV %s %s\n",
-             clients[sender_index].username,
-             message);
+    snprintf(
+        outgoing,
+        sizeof(outgoing),
+        "MSG PRIV %s %s\n",
+        clients[sender_index].username,
+        message);
 
-    send_text_index(target_index,
-                    outgoing);
+    send_text_index(
+        target_index,
+        outgoing);
 
     return 1;
 }
 
 
 /* --------------------------------------------------------- */
-/* ROOMS                                                     */
+/* ROOM FUNCTIONS                                            */
 /* --------------------------------------------------------- */
 
 static int find_room_unlocked(const char *room_name)
 {
-    for (int i = 0; i < MAX_ROOMS; i++)
+    for (int i = 0;
+         i < MAX_ROOMS;
+         i++)
     {
         if (rooms[i].active &&
-            strcmp(rooms[i].name,
-                   room_name) == 0)
+            strcmp(
+                rooms[i].name,
+                room_name) == 0)
         {
             return i;
         }
@@ -414,14 +536,18 @@ static int join_room(int client_index,
 {
     int room_index;
 
-    pthread_mutex_lock(&state_mutex);
+    pthread_mutex_lock(
+        &state_mutex);
 
     room_index =
-        find_room_unlocked(room_name);
+        find_room_unlocked(
+            room_name);
 
     if (room_index == -1)
     {
-        for (int i = 0; i < MAX_ROOMS; i++)
+        for (int i = 0;
+             i < MAX_ROOMS;
+             i++)
         {
             if (!rooms[i].active)
             {
@@ -429,16 +555,20 @@ static int join_room(int client_index,
 
                 rooms[i].active = 1;
 
-                strncpy(rooms[i].name,
-                        room_name,
-                        ROOM_NAME_SIZE - 1);
+                strncpy(
+                    rooms[i].name,
+                    room_name,
+                    ROOM_NAME_SIZE - 1);
 
                 rooms[i].name[
-                    ROOM_NAME_SIZE - 1] = '\0';
+                    ROOM_NAME_SIZE - 1] =
+                    '\0';
 
-                memset(rooms[i].members,
-                       0,
-                       sizeof(rooms[i].members));
+                memset(
+                    rooms[i].members,
+                    0,
+                    sizeof(
+                        rooms[i].members));
 
                 break;
             }
@@ -451,7 +581,8 @@ static int join_room(int client_index,
             .members[client_index] = 1;
     }
 
-    pthread_mutex_unlock(&state_mutex);
+    pthread_mutex_unlock(
+        &state_mutex);
 
     return room_index;
 }
@@ -462,10 +593,12 @@ static int leave_room(int client_index,
 {
     int result = -1;
 
-    pthread_mutex_lock(&state_mutex);
+    pthread_mutex_lock(
+        &state_mutex);
 
     int room_index =
-        find_room_unlocked(room_name);
+        find_room_unlocked(
+            room_name);
 
     if (room_index != -1)
     {
@@ -483,7 +616,8 @@ static int leave_room(int client_index,
         }
     }
 
-    pthread_mutex_unlock(&state_mutex);
+    pthread_mutex_unlock(
+        &state_mutex);
 
     return result;
 }
@@ -494,30 +628,38 @@ static void build_room_list(char *output,
 {
     output[0] = '\0';
 
-    pthread_mutex_lock(&state_mutex);
+    pthread_mutex_lock(
+        &state_mutex);
 
     int first = 1;
 
-    for (int i = 0; i < MAX_ROOMS; i++)
+    for (int i = 0;
+         i < MAX_ROOMS;
+         i++)
     {
         if (rooms[i].active)
         {
             if (!first)
             {
-                strncat(output,
-                        ",",
-                        size - strlen(output) - 1);
+                strncat(
+                    output,
+                    ",",
+                    size -
+                    strlen(output) - 1);
             }
 
-            strncat(output,
-                    rooms[i].name,
-                    size - strlen(output) - 1);
+            strncat(
+                output,
+                rooms[i].name,
+                size -
+                strlen(output) - 1);
 
             first = 0;
         }
     }
 
-    pthread_mutex_unlock(&state_mutex);
+    pthread_mutex_unlock(
+        &state_mutex);
 }
 
 
@@ -528,27 +670,36 @@ static int room_message(int sender_index,
     int targets[MAX_CLIENTS];
     int count = 0;
 
-    pthread_mutex_lock(&state_mutex);
+    pthread_mutex_lock(
+        &state_mutex);
 
     int room_index =
-        find_room_unlocked(room_name);
+        find_room_unlocked(
+            room_name);
 
     if (room_index == -1)
     {
-        pthread_mutex_unlock(&state_mutex);
+        pthread_mutex_unlock(
+            &state_mutex);
+
         return -1;
     }
 
     if (!rooms[room_index]
              .members[sender_index])
     {
-        pthread_mutex_unlock(&state_mutex);
+        pthread_mutex_unlock(
+            &state_mutex);
+
         return 0;
     }
 
-    for (int i = 0; i < MAX_CLIENTS; i++)
+    for (int i = 0;
+         i < MAX_CLIENTS;
+         i++)
     {
-        if (rooms[room_index].members[i] &&
+        if (rooms[room_index]
+                .members[i] &&
             clients[i].active &&
             clients[i].registered)
         {
@@ -556,21 +707,27 @@ static int room_message(int sender_index,
         }
     }
 
-    pthread_mutex_unlock(&state_mutex);
+    pthread_mutex_unlock(
+        &state_mutex);
 
-    char outgoing[BUFFER_SIZE + 160];
+    char outgoing[
+        BUFFER_SIZE + 160];
 
-    snprintf(outgoing,
-             sizeof(outgoing),
-             "MSG ROOM %s %s %s\n",
-             room_name,
-             clients[sender_index].username,
-             message);
+    snprintf(
+        outgoing,
+        sizeof(outgoing),
+        "MSG ROOM %s %s %s\n",
+        room_name,
+        clients[sender_index].username,
+        message);
 
-    for (int i = 0; i < count; i++)
+    for (int i = 0;
+         i < count;
+         i++)
     {
-        send_text_index(targets[i],
-                        outgoing);
+        send_text_index(
+            targets[i],
+            outgoing);
     }
 
     return 1;
@@ -595,77 +752,107 @@ static int create_directory(const char *path)
 
 static int valid_filename(const char *filename)
 {
-    if (strstr(filename, "..") != NULL)
+    if (strstr(
+            filename,
+            "..") != NULL)
+    {
         return 0;
+    }
 
-    if (strchr(filename, '/') != NULL)
+    if (strchr(
+            filename,
+            '/') != NULL)
+    {
         return 0;
+    }
 
-    if (strchr(filename, '\\') != NULL)
+    if (strchr(
+            filename,
+            '\\') != NULL)
+    {
         return 0;
+    }
 
     return 1;
 }
 
 
-static int store_received_file(int fd,
-                               const char *username,
-                               const char *filename,
-                               size_t filesize,
-                               char *saved_path,
-                               size_t saved_path_size)
+static int store_received_file(
+    int fd,
+    const char *username,
+    const char *filename,
+    size_t filesize,
+    char *saved_path,
+    size_t saved_path_size)
 {
-    if (create_directory("./storage") < 0)
+    if (create_directory(
+            "./storage") < 0)
+    {
         return -1;
+    }
 
-    if (create_directory(STORAGE_ROOT) < 0)
+    if (create_directory(
+            STORAGE_ROOT) < 0)
+    {
         return -1;
+    }
 
     char user_directory[256];
 
-    snprintf(user_directory,
-             sizeof(user_directory),
-             "%s/%s",
-             STORAGE_ROOT,
-             username);
+    snprintf(
+        user_directory,
+        sizeof(user_directory),
+        "%s/%s",
+        STORAGE_ROOT,
+        username);
 
-    if (create_directory(user_directory) < 0)
+    if (create_directory(
+            user_directory) < 0)
+    {
         return -1;
+    }
 
-    snprintf(saved_path,
-             saved_path_size,
-             "%s/%s",
-             user_directory,
-             filename);
+    snprintf(
+        saved_path,
+        saved_path_size,
+        "%s/%s",
+        user_directory,
+        filename);
 
     FILE *fp =
-        fopen(saved_path, "wb");
+        fopen(saved_path,
+              "wb");
 
     if (fp == NULL)
         return -1;
 
     char buffer[4096];
-    size_t remaining = filesize;
+
+    size_t remaining =
+        filesize;
 
     while (remaining > 0)
     {
         size_t chunk =
-            remaining > sizeof(buffer)
+            remaining >
+            sizeof(buffer)
                 ? sizeof(buffer)
                 : remaining;
 
-        if (recv_exact(fd,
-                       buffer,
-                       chunk) < 0)
+        if (recv_exact(
+                fd,
+                buffer,
+                chunk) < 0)
         {
             fclose(fp);
             return -1;
         }
 
-        if (fwrite(buffer,
-                   1,
-                   chunk,
-                   fp) != chunk)
+        if (fwrite(
+                buffer,
+                1,
+                chunk,
+                fp) != chunk)
         {
             fclose(fp);
             return -1;
@@ -684,37 +871,44 @@ static int store_received_file(int fd,
 /* FILE FORWARDING                                           */
 /* --------------------------------------------------------- */
 
-static int send_file_to_client(int client_index,
-                               const char *sender,
-                               const char *filename,
-                               const char *path,
-                               size_t filesize)
+static int send_file_to_client(
+    int client_index,
+    const char *sender,
+    const char *filename,
+    const char *path,
+    size_t filesize)
 {
     FILE *fp =
-        fopen(path, "rb");
+        fopen(path,
+              "rb");
 
     if (fp == NULL)
         return -1;
 
     char header[512];
 
-    snprintf(header,
-             sizeof(header),
-             "MSG FILE %s %s %zu\n",
-             sender,
-             filename,
-             filesize);
+    snprintf(
+        header,
+        sizeof(header),
+        "MSG FILE %s %s %zu\n",
+        sender,
+        filename,
+        filesize);
 
     pthread_mutex_lock(
-        &send_mutex[client_index]);
+        &send_mutex[
+            client_index]);
 
     if (send_all_raw(
-            clients[client_index].socket_fd,
+            clients[
+                client_index]
+                .socket_fd,
             header,
             strlen(header)) < 0)
     {
         pthread_mutex_unlock(
-            &send_mutex[client_index]);
+            &send_mutex[
+                client_index]);
 
         fclose(fp);
 
@@ -722,25 +916,30 @@ static int send_file_to_client(int client_index,
     }
 
     char buffer[4096];
-    size_t remaining = filesize;
+
+    size_t remaining =
+        filesize;
 
     while (remaining > 0)
     {
         size_t chunk =
-            remaining > sizeof(buffer)
+            remaining >
+            sizeof(buffer)
                 ? sizeof(buffer)
                 : remaining;
 
         size_t nread =
-            fread(buffer,
-                  1,
-                  chunk,
-                  fp);
+            fread(
+                buffer,
+                1,
+                chunk,
+                fp);
 
         if (nread == 0)
         {
             pthread_mutex_unlock(
-                &send_mutex[client_index]);
+                &send_mutex[
+                    client_index]);
 
             fclose(fp);
 
@@ -748,12 +947,15 @@ static int send_file_to_client(int client_index,
         }
 
         if (send_all_raw(
-                clients[client_index].socket_fd,
+                clients[
+                    client_index]
+                    .socket_fd,
                 buffer,
                 nread) < 0)
         {
             pthread_mutex_unlock(
-                &send_mutex[client_index]);
+                &send_mutex[
+                    client_index]);
 
             fclose(fp);
 
@@ -764,7 +966,8 @@ static int send_file_to_client(int client_index,
     }
 
     pthread_mutex_unlock(
-        &send_mutex[client_index]);
+        &send_mutex[
+            client_index]);
 
     fclose(fp);
 
@@ -772,20 +975,24 @@ static int send_file_to_client(int client_index,
 }
 
 
-static int send_file_target(int sender_index,
-                            const char *target,
-                            const char *filename,
-                            const char *path,
-                            size_t filesize)
+static int send_file_target(
+    int sender_index,
+    const char *target,
+    const char *filename,
+    const char *path,
+    size_t filesize)
 {
     int user_index =
-        find_user_index(target);
+        find_user_index(
+            target);
 
     if (user_index >= 0)
     {
         send_file_to_client(
             user_index,
-            clients[sender_index].username,
+            clients[
+                sender_index]
+                .username,
             filename,
             path,
             filesize);
@@ -796,42 +1003,60 @@ static int send_file_target(int sender_index,
     int targets[MAX_CLIENTS];
     int count = 0;
 
-    pthread_mutex_lock(&state_mutex);
+    pthread_mutex_lock(
+        &state_mutex);
 
     int room_index =
-        find_room_unlocked(target);
+        find_room_unlocked(
+            target);
 
     if (room_index == -1)
     {
-        pthread_mutex_unlock(&state_mutex);
+        pthread_mutex_unlock(
+            &state_mutex);
+
         return -1;
     }
 
-    if (!rooms[room_index]
-             .members[sender_index])
+    if (!rooms[
+             room_index]
+             .members[
+                 sender_index])
     {
-        pthread_mutex_unlock(&state_mutex);
+        pthread_mutex_unlock(
+            &state_mutex);
+
         return 0;
     }
 
-    for (int i = 0; i < MAX_CLIENTS; i++)
+    for (int i = 0;
+         i < MAX_CLIENTS;
+         i++)
     {
         if (i != sender_index &&
-            rooms[room_index].members[i] &&
+            rooms[
+                room_index]
+                .members[i] &&
             clients[i].active &&
             clients[i].registered)
         {
-            targets[count++] = i;
+            targets[count++] =
+                i;
         }
     }
 
-    pthread_mutex_unlock(&state_mutex);
+    pthread_mutex_unlock(
+        &state_mutex);
 
-    for (int i = 0; i < count; i++)
+    for (int i = 0;
+         i < count;
+         i++)
     {
         send_file_to_client(
             targets[i],
-            clients[sender_index].username,
+            clients[
+                sender_index]
+                .username,
             filename,
             path,
             filesize);
@@ -847,20 +1072,40 @@ static int send_file_target(int sender_index,
 
 static void remove_client(int index)
 {
-    pthread_mutex_lock(&state_mutex);
+    pthread_mutex_lock(
+        &state_mutex);
 
-    for (int i = 0; i < MAX_ROOMS; i++)
+    for (int i = 0;
+         i < MAX_ROOMS;
+         i++)
     {
         if (rooms[i].active)
-            rooms[i].members[index] = 0;
+        {
+            rooms[i]
+                .members[index] = 0;
+        }
     }
 
-    clients[index].socket_fd = -1;
-    clients[index].active = 0;
-    clients[index].registered = 0;
-    clients[index].username[0] = '\0';
+    clients[index]
+        .socket_fd = -1;
 
-    pthread_mutex_unlock(&state_mutex);
+    clients[index]
+        .active = 0;
+
+    clients[index]
+        .registered = 0;
+
+    clients[index]
+        .username[0] = '\0';
+
+    clients[index]
+        .rate_window_start = 0;
+
+    clients[index]
+        .command_count = 0;
+
+    pthread_mutex_unlock(
+        &state_mutex);
 }
 
 
@@ -876,29 +1121,39 @@ static void *handle_client(void *arg)
     free(arg);
 
     int fd =
-        clients[index].socket_fd;
+        clients[index]
+            .socket_fd;
 
-    char buffer[BUFFER_SIZE];
+    char buffer[
+        BUFFER_SIZE];
 
     while (1)
     {
         ssize_t n =
-            recv_line(fd,
-                      buffer,
-                      sizeof(buffer));
+            recv_line(
+                fd,
+                buffer,
+                sizeof(buffer));
 
         if (n <= 0)
         {
-            if (clients[index].registered)
+            if (clients[index]
+                    .registered)
             {
-                char old_username[USERNAME_SIZE];
+                char old_username[
+                    USERNAME_SIZE];
 
-                strncpy(old_username,
-                        clients[index].username,
-                        sizeof(old_username) - 1);
+                strncpy(
+                    old_username,
+                    clients[index]
+                        .username,
+                    sizeof(
+                        old_username) - 1);
 
                 old_username[
-                    sizeof(old_username) - 1] = '\0';
+                    sizeof(
+                        old_username) - 1] =
+                    '\0';
 
                 printf(
                     "User %s disconnected unexpectedly.\n",
@@ -906,12 +1161,15 @@ static void *handle_client(void *arg)
 
                 char log_message[128];
 
-                snprintf(log_message,
-                         sizeof(log_message),
-                         "Unexpected disconnect: %s",
-                         old_username);
+                snprintf(
+                    log_message,
+                    sizeof(
+                        log_message),
+                    "Unexpected disconnect: %s",
+                    old_username);
 
-                log_event(log_message);
+                log_event(
+                    log_message);
 
                 presence_message(
                     index,
@@ -922,22 +1180,62 @@ static void *handle_client(void *arg)
             break;
         }
 
-        printf("Client %d received: %s\n",
-               index,
-               buffer);
+        printf(
+            "Client %d received: %s\n",
+            index,
+            buffer);
+
+
+        /*
+         * SENDFILE is excluded from rate limiting
+         * because raw bytes immediately follow its
+         * command line. Rejecting the command before
+         * consuming those bytes would break framing.
+         */
+        if (strncmp(
+                buffer,
+                "SENDFILE ",
+                9) != 0)
+        {
+            if (!check_rate_limit(
+                    index))
+            {
+                send_text_index(
+                    index,
+                    "ERR 010 RATE_LIMITED NID:7566\n");
+
+                char log_message[128];
+
+                snprintf(
+                    log_message,
+                    sizeof(
+                        log_message),
+                    "Rate limit triggered for slot %d",
+                    index);
+
+                log_event(
+                    log_message);
+
+                continue;
+            }
+        }
 
 
         /* REGISTER */
 
-        if (!clients[index].registered)
+        if (!clients[index]
+                 .registered)
         {
-            char username[USERNAME_SIZE];
+            char username[
+                USERNAME_SIZE];
 
-            if (sscanf(buffer,
-                       "REGISTER %49s",
-                       username) == 1)
+            if (sscanf(
+                    buffer,
+                    "REGISTER %49s",
+                    username) == 1)
             {
-                if (username_exists(username))
+                if (username_exists(
+                        username))
                 {
                     send_text_index(
                         index,
@@ -946,40 +1244,50 @@ static void *handle_client(void *arg)
                     continue;
                 }
 
-                pthread_mutex_lock(&state_mutex);
+                pthread_mutex_lock(
+                    &state_mutex);
 
-                clients[index].registered = 1;
+                clients[index]
+                    .registered = 1;
 
                 strncpy(
-                    clients[index].username,
+                    clients[index]
+                        .username,
                     username,
                     USERNAME_SIZE - 1);
 
                 clients[index]
                     .username[
-                        USERNAME_SIZE - 1] = '\0';
+                        USERNAME_SIZE - 1] =
+                    '\0';
 
-                pthread_mutex_unlock(&state_mutex);
+                pthread_mutex_unlock(
+                    &state_mutex);
 
                 char response[128];
 
-                snprintf(response,
-                         sizeof(response),
-                         "OK REGISTERED %s %s\n",
-                         username,
-                         NID_TAG);
+                snprintf(
+                    response,
+                    sizeof(response),
+                    "OK REGISTERED %s %s\n",
+                    username,
+                    NID_TAG);
 
-                send_text_index(index,
-                                response);
+                send_text_index(
+                    index,
+                    response);
 
                 char log_message[128];
 
-                snprintf(log_message,
-                         sizeof(log_message),
-                         "Registered: %s",
-                         username);
+                snprintf(
+                    log_message,
+                    sizeof(
+                        log_message),
+                    "Registered: %s",
+                    username);
 
-                log_event(log_message);
+                log_event(
+                    log_message);
 
                 presence_message(
                     index,
@@ -999,67 +1307,93 @@ static void *handle_client(void *arg)
 
         /* LIST */
 
-        if (strcmp(buffer, "LIST") == 0)
+        if (strcmp(
+                buffer,
+                "LIST") == 0)
         {
-            char list[BUFFER_SIZE];
-            char response[BUFFER_SIZE + 64];
+            char list[
+                BUFFER_SIZE];
+
+            char response[
+                BUFFER_SIZE + 64];
 
             build_user_list(
                 list,
                 sizeof(list));
 
-            snprintf(response,
-                     sizeof(response),
-                     "OK USERS %s %s\n",
-                     list,
-                     NID_TAG);
+            snprintf(
+                response,
+                sizeof(response),
+                "OK USERS %s %s\n",
+                list,
+                NID_TAG);
 
-            send_text_index(index,
-                            response);
+            send_text_index(
+                index,
+                response);
         }
 
 
         /* BCAST */
 
-        else if (strncmp(buffer,
-                         "BCAST ",
-                         6) == 0)
+        else if (strncmp(
+                     buffer,
+                     "BCAST ",
+                     6) == 0)
         {
             const char *message =
                 buffer + 6;
 
-            broadcast_message(
-                index,
-                message);
+            if (*message == '\0')
+            {
+                send_text_index(
+                    index,
+                    "ERR 005 INVALID_COMMAND NID:7566\n");
+            }
+            else
+            {
+                broadcast_message(
+                    index,
+                    message);
 
-            send_text_index(
-                index,
-                "OK SENT NID:7566\n");
+                send_text_index(
+                    index,
+                    "OK SENT NID:7566\n");
 
-            char log_message[256];
+                char log_message[256];
 
-            snprintf(log_message,
-                     sizeof(log_message),
-                     "BCAST from %s",
-                     clients[index].username);
+                snprintf(
+                    log_message,
+                    sizeof(
+                        log_message),
+                    "BCAST from %s",
+                    clients[index]
+                        .username);
 
-            log_event(log_message);
+                log_event(
+                    log_message);
+            }
         }
 
 
         /* PMSG */
 
-        else if (strncmp(buffer,
-                         "PMSG ",
-                         5) == 0)
+        else if (strncmp(
+                     buffer,
+                     "PMSG ",
+                     5) == 0)
         {
-            char target[USERNAME_SIZE];
-            char message[BUFFER_SIZE];
+            char target[
+                USERNAME_SIZE];
 
-            if (sscanf(buffer,
-                       "PMSG %49s %1023[^\n]",
-                       target,
-                       message) == 2)
+            char message[
+                BUFFER_SIZE];
+
+            if (sscanf(
+                    buffer,
+                    "PMSG %49s %1023[^\n]",
+                    target,
+                    message) == 2)
             {
                 if (private_message(
                         index,
@@ -1088,15 +1422,18 @@ static void *handle_client(void *arg)
 
         /* JOIN */
 
-        else if (strncmp(buffer,
-                         "JOIN ",
-                         5) == 0)
+        else if (strncmp(
+                     buffer,
+                     "JOIN ",
+                     5) == 0)
         {
-            char room_name[ROOM_NAME_SIZE];
+            char room_name[
+                ROOM_NAME_SIZE];
 
-            if (sscanf(buffer,
-                       "JOIN %49s",
-                       room_name) == 1)
+            if (sscanf(
+                    buffer,
+                    "JOIN %49s",
+                    room_name) == 1)
             {
                 if (join_room(
                         index,
@@ -1104,31 +1441,47 @@ static void *handle_client(void *arg)
                 {
                     char response[128];
 
-                    snprintf(response,
-                             sizeof(response),
-                             "OK JOINED %s %s\n",
-                             room_name,
-                             NID_TAG);
+                    snprintf(
+                        response,
+                        sizeof(response),
+                        "OK JOINED %s %s\n",
+                        room_name,
+                        NID_TAG);
 
                     send_text_index(
                         index,
                         response);
                 }
+                else
+                {
+                    send_text_index(
+                        index,
+                        "ERR 008 ROOM_LIMIT_REACHED NID:7566\n");
+                }
+            }
+            else
+            {
+                send_text_index(
+                    index,
+                    "ERR 005 INVALID_COMMAND NID:7566\n");
             }
         }
 
 
         /* LEAVE */
 
-        else if (strncmp(buffer,
-                         "LEAVE ",
-                         6) == 0)
+        else if (strncmp(
+                     buffer,
+                     "LEAVE ",
+                     6) == 0)
         {
-            char room_name[ROOM_NAME_SIZE];
+            char room_name[
+                ROOM_NAME_SIZE];
 
-            if (sscanf(buffer,
-                       "LEAVE %49s",
-                       room_name) == 1)
+            if (sscanf(
+                    buffer,
+                    "LEAVE %49s",
+                    room_name) == 1)
             {
                 int result =
                     leave_room(
@@ -1139,11 +1492,12 @@ static void *handle_client(void *arg)
                 {
                     char response[128];
 
-                    snprintf(response,
-                             sizeof(response),
-                             "OK LEFT %s %s\n",
-                             room_name,
-                             NID_TAG);
+                    snprintf(
+                        response,
+                        sizeof(response),
+                        "OK LEFT %s %s\n",
+                        room_name,
+                        NID_TAG);
 
                     send_text_index(
                         index,
@@ -1162,45 +1516,62 @@ static void *handle_client(void *arg)
                         "ERR 007 NOT_IN_ROOM NID:7566\n");
                 }
             }
+            else
+            {
+                send_text_index(
+                    index,
+                    "ERR 005 INVALID_COMMAND NID:7566\n");
+            }
         }
 
 
         /* ROOMS */
 
-        else if (strcmp(buffer,
-                        "ROOMS") == 0)
+        else if (strcmp(
+                     buffer,
+                     "ROOMS") == 0)
         {
-            char list[BUFFER_SIZE];
-            char response[BUFFER_SIZE + 64];
+            char list[
+                BUFFER_SIZE];
+
+            char response[
+                BUFFER_SIZE + 64];
 
             build_room_list(
                 list,
                 sizeof(list));
 
-            snprintf(response,
-                     sizeof(response),
-                     "OK ROOMS %s %s\n",
-                     list,
-                     NID_TAG);
+            snprintf(
+                response,
+                sizeof(response),
+                "OK ROOMS %s %s\n",
+                list,
+                NID_TAG);
 
-            send_text_index(index,
-                            response);
+            send_text_index(
+                index,
+                response);
         }
 
 
         /* RMSG */
 
-        else if (strncmp(buffer,
-                         "RMSG ",
-                         5) == 0)
+        else if (strncmp(
+                     buffer,
+                     "RMSG ",
+                     5) == 0)
         {
-            char room_name[ROOM_NAME_SIZE];
-            char message[BUFFER_SIZE];
+            char room_name[
+                ROOM_NAME_SIZE];
 
-            if (sscanf(buffer,
-                       "RMSG %49s %1023[^\n]",
-                       room_name,
-                       message) == 2)
+            char message[
+                BUFFER_SIZE];
+
+            if (sscanf(
+                    buffer,
+                    "RMSG %49s %1023[^\n]",
+                    room_name,
+                    message) == 2)
             {
                 int result =
                     room_message(
@@ -1227,19 +1598,29 @@ static void *handle_client(void *arg)
                         "ERR 007 NOT_IN_ROOM NID:7566\n");
                 }
             }
+            else
+            {
+                send_text_index(
+                    index,
+                    "ERR 005 INVALID_COMMAND NID:7566\n");
+            }
         }
 
 
         /* SENDFILE */
 
-        else if (strncmp(buffer,
-                         "SENDFILE ",
-                         9) == 0)
+        else if (strncmp(
+                     buffer,
+                     "SENDFILE ",
+                     9) == 0)
         {
-            char target[USERNAME_SIZE];
+            char target[
+                USERNAME_SIZE];
+
             char filename[256];
 
-            unsigned long filesize_ul;
+            unsigned long
+                filesize_ul;
 
             if (sscanf(
                     buffer,
@@ -1255,7 +1636,8 @@ static void *handle_client(void *arg)
                 continue;
             }
 
-            if (!valid_filename(filename))
+            if (!valid_filename(
+                    filename))
             {
                 send_text_index(
                     index,
@@ -1278,9 +1660,11 @@ static void *handle_client(void *arg)
 
             if (store_received_file(
                     fd,
-                    clients[index].username,
+                    clients[index]
+                        .username,
                     filename,
-                    (size_t)filesize_ul,
+                    (size_t)
+                        filesize_ul,
                     path,
                     sizeof(path)) < 0)
             {
@@ -1297,7 +1681,8 @@ static void *handle_client(void *arg)
                     target,
                     filename,
                     path,
-                    (size_t)filesize_ul);
+                    (size_t)
+                        filesize_ul);
 
             if (result == -1)
             {
@@ -1330,13 +1715,16 @@ static void *handle_client(void *arg)
 
                 snprintf(
                     log_message,
-                    sizeof(log_message),
+                    sizeof(
+                        log_message),
                     "FILE from %s: %s (%lu bytes)",
-                    clients[index].username,
+                    clients[index]
+                        .username,
                     filename,
                     filesize_ul);
 
-                log_event(log_message);
+                log_event(
+                    log_message);
 
                 printf(
                     "Stored file: %s\n",
@@ -1347,26 +1735,40 @@ static void *handle_client(void *arg)
 
         /* QUIT */
 
-        else if (strcmp(buffer,
-                        "QUIT") == 0)
+        else if (strcmp(
+                     buffer,
+                     "QUIT") == 0)
         {
             char old_username[
                 USERNAME_SIZE];
 
             strncpy(
                 old_username,
-                clients[index].username,
-                sizeof(old_username) - 1);
+                clients[index]
+                    .username,
+                sizeof(
+                    old_username) - 1);
 
             old_username[
-                sizeof(old_username) - 1] = '\0';
+                sizeof(
+                    old_username) - 1] =
+                '\0';
 
             send_text_index(
                 index,
                 "OK BYE NID:7566\n");
 
+            char log_message[128];
+
+            snprintf(
+                log_message,
+                sizeof(
+                    log_message),
+                "Graceful disconnect: %s",
+                old_username);
+
             log_event(
-                "Graceful client disconnect");
+                log_message);
 
             presence_message(
                 index,
@@ -1389,7 +1791,8 @@ static void *handle_client(void *arg)
 
     close(fd);
 
-    remove_client(index);
+    remove_client(
+        index);
 
     return NULL;
 }
@@ -1404,21 +1807,31 @@ int main(void)
     int server_fd;
     int opt = 1;
 
-    struct sockaddr_in server_addr;
+    struct sockaddr_in
+        server_addr;
 
-    memset(clients,
-           0,
-           sizeof(clients));
+    memset(
+        clients,
+        0,
+        sizeof(clients));
 
-    memset(rooms,
-           0,
-           sizeof(rooms));
+    memset(
+        rooms,
+        0,
+        sizeof(rooms));
 
     for (int i = 0;
          i < MAX_CLIENTS;
          i++)
     {
-        clients[i].socket_fd = -1;
+        clients[i]
+            .socket_fd = -1;
+
+        clients[i]
+            .rate_window_start = 0;
+
+        clients[i]
+            .command_count = 0;
 
         pthread_mutex_init(
             &send_mutex[i],
@@ -1426,13 +1839,15 @@ int main(void)
     }
 
     server_fd =
-        socket(AF_INET,
-               SOCK_STREAM,
-               0);
+        socket(
+            AF_INET,
+            SOCK_STREAM,
+            0);
 
     if (server_fd < 0)
     {
         perror("socket");
+
         return EXIT_FAILURE;
     }
 
@@ -1443,32 +1858,46 @@ int main(void)
             &opt,
             sizeof(opt)) < 0)
     {
-        perror("setsockopt");
-        close(server_fd);
+        perror(
+            "setsockopt");
+
+        close(
+            server_fd);
+
         return EXIT_FAILURE;
     }
 
-    memset(&server_addr,
-           0,
-           sizeof(server_addr));
+    memset(
+        &server_addr,
+        0,
+        sizeof(
+            server_addr));
 
-    server_addr.sin_family =
+    server_addr
+        .sin_family =
         AF_INET;
 
-    server_addr.sin_addr.s_addr =
+    server_addr
+        .sin_addr
+        .s_addr =
         INADDR_ANY;
 
-    server_addr.sin_port =
+    server_addr
+        .sin_port =
         htons(PORT);
 
     if (bind(
             server_fd,
             (struct sockaddr *)
                 &server_addr,
-            sizeof(server_addr)) < 0)
+            sizeof(
+                server_addr)) < 0)
     {
         perror("bind");
-        close(server_fd);
+
+        close(
+            server_fd);
+
         return EXIT_FAILURE;
     }
 
@@ -1477,7 +1906,10 @@ int main(void)
             BACKLOG) < 0)
     {
         perror("listen");
-        close(server_fd);
+
+        close(
+            server_fd);
+
         return EXIT_FAILURE;
     }
 
@@ -1491,14 +1923,23 @@ int main(void)
         "Listening on port %d\n",
         PORT);
 
-    log_event("Server started");
+    printf(
+        "Rate limit: %d commands per %d seconds\n",
+        RATE_LIMIT_COMMANDS,
+        RATE_LIMIT_WINDOW);
+
+    log_event(
+        "Server started");
+
 
     while (1)
     {
-        struct sockaddr_in client_addr;
+        struct sockaddr_in
+            client_addr;
 
         socklen_t client_len =
-            sizeof(client_addr);
+            sizeof(
+                client_addr);
 
         int client_fd =
             accept(
@@ -1522,19 +1963,32 @@ int main(void)
              i < MAX_CLIENTS;
              i++)
         {
-            if (!clients[i].active)
+            if (!clients[i]
+                     .active)
             {
                 index = i;
 
-                clients[i].socket_fd =
+                clients[i]
+                    .socket_fd =
                     client_fd;
 
-                clients[i].active = 1;
-
-                clients[i].registered = 0;
+                clients[i]
+                    .active = 1;
 
                 clients[i]
-                    .username[0] = '\0';
+                    .registered = 0;
+
+                clients[i]
+                    .username[0] =
+                    '\0';
+
+                clients[i]
+                    .rate_window_start =
+                    0;
+
+                clients[i]
+                    .command_count =
+                    0;
 
                 break;
             }
@@ -1545,13 +1999,16 @@ int main(void)
 
         if (index == -1)
         {
+            const char *message =
+                "ERR 006 SERVER_FULL NID:7566\n";
+
             send_all_raw(
                 client_fd,
-                "ERR 006 SERVER_FULL NID:7566\n",
-                strlen(
-                    "ERR 006 SERVER_FULL NID:7566\n"));
+                message,
+                strlen(message));
 
-            close(client_fd);
+            close(
+                client_fd);
 
             continue;
         }
@@ -1559,22 +2016,31 @@ int main(void)
         printf(
             "Client connected from %s:%d (slot %d)\n",
             inet_ntoa(
-                client_addr.sin_addr),
+                client_addr
+                    .sin_addr),
             ntohs(
-                client_addr.sin_port),
+                client_addr
+                    .sin_port),
             index);
 
         int *thread_index =
-            malloc(sizeof(int));
+            malloc(
+                sizeof(int));
 
-        if (thread_index == NULL)
+        if (thread_index ==
+            NULL)
         {
-            close(client_fd);
-            remove_client(index);
+            close(
+                client_fd);
+
+            remove_client(
+                index);
+
             continue;
         }
 
-        *thread_index = index;
+        *thread_index =
+            index;
 
         pthread_t thread_id;
 
@@ -1584,13 +2050,20 @@ int main(void)
                 handle_client,
                 thread_index) != 0)
         {
-            free(thread_index);
-            close(client_fd);
-            remove_client(index);
+            free(
+                thread_index);
+
+            close(
+                client_fd);
+
+            remove_client(
+                index);
+
             continue;
         }
 
-        pthread_detach(thread_id);
+        pthread_detach(
+            thread_id);
     }
 
     close(server_fd);
