@@ -3,3 +3,4 @@ client_6632
 *.o
 *.log
 storage/
+server_6632_backup.c
